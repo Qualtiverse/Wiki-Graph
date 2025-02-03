@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Article Statistics</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; }
+        #chartContainer { width: 90%; margin: auto; }
+        canvas { width: 100% !important; height: auto !important; }
+        .options {
+            position: absolute;
+            background-color: white;
+            border: 1px solid #ccc;
+            padding: 10px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.15);
+            z-index: 100;
+            display: none;
+        }
+        .options button {
+            margin-top: 5px;
+        }
+        #searchBarContainer {
+            margin-bottom: 10px;
+        }
+        #wikiSelector {
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Article Statistics</h1>
+    <div id="wikiSelector">
+        <label for="wikiDropdown">Select Wiki: </label>
+        <select id="wikiDropdown" onchange="changeWiki()">
+            <option value="worldofwar">World of War</option>
+            <option value="qualtiversewiki">Qualtiverse Wiki</option>
+        </select>
+    </div>
+    <div id="searchBarContainer">
+        <input type="text" id="searchBar" placeholder="Search for an article..." oninput="debounceSearch()">
+    </div>
+    <p id="articleCount">Total number of articles: 0</p>
+    <div id="chartContainer">
+        <canvas id="chartCanvas"></canvas>
+    </div>
+
+    <script>
+        let currentPages = [];
+        let chartInstance = null;
+        let chartData = [];
+        let apiUrl = '';
+        let debounceTimeout = null;
+        let zoomFactor = 1.1; // Zoom in factor
+        let minZoom = 0.5; // Minimum zoom out limit
+        let maxZoom = 5; // Maximum zoom in limit
+
+        // Default to World of War
+        setWikiApiUrl('worldofwar');
+        let fetchedData = [];
+
+        function setWikiApiUrl(wiki) {
+            if (wiki === 'worldofwar') {
+                apiUrl = 'https://worldofwar.miraheze.org/w/api.php';
+            } else if (wiki === 'qualtiversewiki') {
+                apiUrl = 'https://qualtiversewiki.miraheze.org/w/api.php';
+            }
+            fetchData(); // Fetch data from the selected wiki
+        }
+
+        function changeWiki() {
+            const selectedWiki = document.getElementById('wikiDropdown').value;
+            setWikiApiUrl(selectedWiki);
+        }
+
+        function debounceSearch() {
+            clearTimeout(debounceTimeout);
+            debounceTimeout = setTimeout(() => filterArticles(), 300); // Debounce delay of 300ms
+        }
+
+        function getAgeInDays(creationDate) {
+            return Math.floor((new Date() - new Date(creationDate)) / (1000 * 60 * 60 * 24));
+        }
+
+        function calculatePointRadius(size) {
+            const minSize = 5;
+            const maxSize = 10;
+            const maxLength = Math.max(...currentPages.map(page => page.length));
+            const minLength = Math.min(...currentPages.map(page => page.length));
+            return minSize + ((size - minLength) / (maxLength - minLength)) * (maxSize - minSize);
+        }
+
+        function linearRegression(data) {
+            const n = data.length;
+            const sumX = data.reduce((acc, point) => acc + point.x, 0);
+            const sumY = data.reduce((acc, point) => acc + point.y, 0);
+            const sumXY = data.reduce((acc, point) => acc + point.x * point.y, 0);
+            const sumX2 = data.reduce((acc, point) => acc + point.x * point.x, 0);
+
+            const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+            const intercept = (sumY - slope * sumX) / n;
+
+            return { slope, intercept };
+        }
+
+        async function fetchData(continueParams = {}) {
+            let allPages = [];
+            let continueQuery = true;
+            let urlParams = { 
+                action: "query", 
+                generator: "allpages", 
+                gapnamespace: "0", 
+                gaplimit: "100", // Reduce the limit to fetch fewer pages
+                prop: "info", 
+                inprop: "size|created", 
+                format: "json", 
+                origin: "*" 
+            };
+
+            try {
+                while (continueQuery) {
+                    const url = new URL(apiUrl);
+                    url.search = new URLSearchParams({ ...urlParams, ...continueParams });
+                    const response = await fetch(url);
+                    if (!response.ok) throw new Error('Network error');
+                    const data = await response.json();
+                    
+                    if (data.query && data.query.pages) {
+                        allPages.push(...Object.values(data.query.pages));
+                    }
+                    
+                    if (data.continue) {
+                        continueParams = data.continue;
+                    } else {
+                        continueQuery = false;
+                    }
+                }
+                
+                currentPages = allPages.map((page, index) => ({
+                    index: index,
+                    title: page.title,
+                    length: page.length,
+                    created: page.created,
+                    age: getAgeInDays(page.created)
+                }));
+                
+                document.getElementById('articleCount').innerText = `Total number of articles: ${currentPages.length}`;
+                updateGraph(currentPages);
+            } catch (error) {
+                console.error('Error fetching data:', error);
+            }
+        }
+
+        function updateGraph(pages) {
+            if (!pages || pages.length === 0) return;
+
+            chartData = pages.map(page => ({
+                x: page.index,
+                y: page.length,
+                title: page.title,
+                sizeRadius: calculatePointRadius(page.length)
+            }));
+
+            if (chartInstance) {
+                // Only update the chart if necessary
+                chartInstance.data.datasets[0].data = chartData;
+                chartInstance.data.datasets[1].data = calculateBestFitLine(chartData); // Update line of best fit
+                chartInstance.update();
+            } else {
+                const ctx = document.getElementById('chartCanvas').getContext('2d');
+                chartInstance = new Chart(ctx, {
+                    type: 'scatter',
+                    data: {
+                        datasets: [{
+                            label: 'Article Sizes (bytes)',
+                            data: chartData,
+                            backgroundColor: 'rgba(75, 192, 192, 0.6)',
+                            pointRadius: (context) => context.raw.sizeRadius,
+                            hoverRadius: (context) => context.raw.sizeRadius + 2
+                        },
+                        {
+                            label: 'Line of Best Fit',
+                            data: calculateBestFitLine(chartData),
+                            borderColor: 'rgba(255, 99, 132, 1)',
+                            borderWidth: 2,
+                            fill: false,
+                            type: 'line'
+                        }]
+                    },
+                    options: {
+                        scales: {
+                            x: { 
+                                title: { display: true, text: 'Article Index' },
+                                type: 'linear', // Ensure it’s treated as linear
+                                min: 0
+                            },
+                            y: { 
+                                title: { display: true, text: 'Size (bytes)' },
+                                min: 0
+                            }
+                        },
+                        plugins: {
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        const point = chartData[context.dataIndex];
+                                        return `${point.title}: ${point.y} bytes`;
+                                    }
+                                }
+                            }
+                        },
+                        onClick: function(event, elements) {
+                            if (elements.length) {
+                                const index = elements[0].index;
+                                const point = chartData[index];
+                                
+                                // Get the selected wiki from the dropdown
+                                const selectedWiki = document.getElementById('wikiDropdown').value;
+                                
+                                // Construct the correct URL based on the selected wiki
+                                let baseUrl = '';
+                                if (selectedWiki === 'worldofwar') {
+                                    baseUrl = 'https://worldofwar.miraheze.org/wiki/';
+                                } else if (selectedWiki === 'qualtiversewiki') {
+                                    baseUrl = 'https://qualtiversewiki.miraheze.org/wiki/';
+                                }
+                                
+                                // Open the article in a new tab
+                                window.open(`${baseUrl}${encodeURIComponent(point.title)}`, '_blank');
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        function calculateBestFitLine(data) {
+            const { slope, intercept } = linearRegression(data);
+            // Calculate y-values for the best-fit line using the slope and intercept
+            return data.map(point => ({
+                x: point.x,
+                y: slope * point.x + intercept
+            }));
+        }
+    </script>
+</body>
+</html>
