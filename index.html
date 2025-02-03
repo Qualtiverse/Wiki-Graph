@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Article Statistics</title>
+    <!-- Link to your CSS file(s) -->
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <h1>Article Statistics</h1>
+    <div id="searchBarContainer">
+        <input type="text" id="searchBar" placeholder="Search for an article..." oninput="filterArticles()">
+    </div>
+    <p id="articleCount">Total number of articles: 0</p>
+    <div id="chartContainer">
+        <canvas id="chartCanvas"></canvas>
+    </div>
+
+    <!-- Your JavaScript code here -->
+    <script>
+        const apiUrl = 'https://worldofwar.miraheze.org/w/api.php';
+        let currentPages = [];
+        let chartInstance = null;
+        let chartData = [];
+
+        function getAgeInDays(creationDate) {
+            return Math.floor((new Date() - new Date(creationDate)) / (1000 * 60 * 60 * 24));
+        }
+
+        function calculatePointRadius(size) {
+            const minSize = 5;
+            const maxSize = 10;
+            const maxLength = Math.max(...currentPages.map(page => page.length));
+            const minLength = Math.min(...currentPages.map(page => page.length));
+            return minSize + ((size - minLength) / (maxLength - minLength)) * (maxSize - minSize);
+        }
+
+        async function fetchData(continueParams = {}) {
+            let allPages = [];
+            let continueQuery = true;
+            let urlParams = { 
+                action: "query", 
+                generator: "allpages", 
+                gapnamespace: "0", 
+                gaplimit: "500", 
+                prop: "info", 
+                inprop: "size|created", 
+                format: "json", 
+                origin: "*" 
+            };
+
+            try {
+                while (continueQuery) {
+                    const url = new URL(apiUrl);
+                    url.search = new URLSearchParams({ ...urlParams, ...continueParams });
+                    const response = await fetch(url);
+                    if (!response.ok) throw new Error('Network error');
+                    const data = await response.json();
+                    
+                    if (data.query && data.query.pages) {
+                        allPages.push(...Object.values(data.query.pages));
+                    }
+                    
+                    if (data.continue) {
+                        continueParams = data.continue;
+                    } else {
+                        continueQuery = false;
+                    }
+                }
+                
+                currentPages = allPages.map((page, index) => ({
+                    index: index,
+                    title: page.title,
+                    length: page.length,
+                    created: page.created,
+                    age: getAgeInDays(page.created)
+                }));
+                
+                document.getElementById('articleCount').innerText = `Total number of articles: ${currentPages.length}`;
+                updateGraph(currentPages);
+            } catch (error) {
+                console.error('Error fetching data:', error);
+            }
+        }
+
+        function updateGraph(pages) {
+            if (!pages || pages.length === 0) return;
+
+            chartData = pages.map(page => ({
+                x: page.index,
+                y: page.length,
+                title: page.title,
+                sizeRadius: calculatePointRadius(page.length)
+            }));
+
+            if (chartInstance) chartInstance.destroy();
+
+            const ctx = document.getElementById('chartCanvas').getContext('2d');
+            chartInstance = new Chart(ctx, {
+                type: 'scatter',
+                data: {
+                    datasets: [{
+                        label: 'Article Sizes (bytes)',
+                        data: chartData,
+                        backgroundColor: 'rgba(75, 192, 192, 0.6)',
+                        pointRadius: (context) => context.raw.sizeRadius,
+                        hoverRadius: (context) => context.raw.sizeRadius + 2
+                    }]
+                },
+                options: {
+                    scales: {
+                        x: { title: { display: true, text: 'Article Index' } },
+                        y: { title: { display: true, text: 'Size (bytes)' } }
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const point = chartData[context.dataIndex];
+                                    return `${point.title}: ${point.y} bytes`;
+                                }
+                            }
+                        }
+                    },
+                    onClick: function(event, elements) {
+                        if (elements.length) {
+                            const index = elements[0].index;
+                            const point = chartData[index];
+                            window.open(`https://worldofwar.miraheze.org/wiki/${encodeURIComponent(point.title)}`, '_blank');
+                        }
+                    }
+                }
+            });
+        }
+
+        function filterArticles() {
+            const searchTerm = document.getElementById('searchBar').value.toLowerCase();
+            const filteredPages = searchTerm
+                ? currentPages.filter(page => page.title.toLowerCase().includes(searchTerm))
+                : currentPages;
+            updateGraph(filteredPages);
+        }
+
+        fetchData();
+    </script>
+</body>
+</html>
